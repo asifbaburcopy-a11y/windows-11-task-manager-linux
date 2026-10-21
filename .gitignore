@@ -1,0 +1,47 @@
+# --- dependencies ---
+node_modules/
+
+# --- build output (large binaries, never commit) ---
+dist/
+out/
+release/
+*.AppImage
+*.deb
+*.rpm
+*.snap
+*.exe
+*.dmg
+*.blockmap
+
+# --- locally downloaded build tooling (Node, git) ---
+.tools/
+.cache/
+
+# --- secrets & credentials ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+id_rsa
+id_ed25519
+.netrc
+.git-credentials
+
+# --- uncurated verification captures (kept locally, never published) ---
+/shot-*.png
+
+# --- logs ---
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

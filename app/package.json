@@ -1,0 +1,33 @@
+{
+  "name": "task-manager-replica",
+  "productName": "Task Manager",
+  "version": "1.1.0",
+  "description": "Windows 11 Task Manager clone for Linux — real-time processes, CPU/memory/disk/network graphs, services, startup apps and users, reading live data from /proc with Electron",
+  "homepage": "https://github.com/USER/windows-11-task-manager-linux",
+  "main": "main.js",
+  "license": "MIT",
+  "author": "windows-11-task-manager-linux contributors",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --linux --publish never",
+    "deb": "python3 ../scripts/make-deb.py"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.taskmanager.linux",
+    "productName": "Task Manager",
+    "directories": { "output": "../dist" },
+    "files": ["main.js", "preload.js", "sysinfo.js", "src/**/*", "assets/**/*"],
+    "linux": {
+      "target": ["AppImage"],
+      "category": "System",
+      "icon": "assets/icon.png",
+      "synopsis": "Windows 11 Task Manager replica",
+      "maintainer": "windows-11-task-manager-linux contributors <noreply@users.noreply.github.com>"
+    },
+    "appImage": { "artifactName": "TaskManager-${version}.${ext}" }
+  }
+}
