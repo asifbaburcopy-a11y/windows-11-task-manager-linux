@@ -132,7 +132,7 @@ sudo apt remove task-manager
 Requires **Node.js 18+** and **npm**. Python 3 is needed only for the `.deb` target.
 
 ```bash
-git clone https://github.com/USER/windows-11-task-manager-linux.git
+git clone https://github.com/asifbaburcopy-a11y/windows-11-task-manager-linux.git
 cd windows-11-task-manager-linux/app
 npm install
 ```
