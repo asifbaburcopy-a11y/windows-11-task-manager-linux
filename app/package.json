@@ -1,7 +1,7 @@
 {
   "name": "task-manager-replica",
   "productName": "Task Manager",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Windows 11 Task Manager clone for Linux — real-time processes, CPU/memory/disk/network graphs, services, startup apps and users, reading live data from /proc with Electron",
   "homepage": "https://github.com/asifbaburcopy-a11y/windows-11-task-manager-linux",
   "main": "main.js",

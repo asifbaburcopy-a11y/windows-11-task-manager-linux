@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('tm', {
   maximize: () => ipcRenderer.send('win:maximize'),
   close: () => ipcRenderer.send('win:close'),
   isMaximized: () => ipcRenderer.invoke('win:isMaximized'),
+  onMaximized: (cb) => {
+    const h = (_e, m) => cb(m);
+    ipcRenderer.on('win:maximized', h);
+    return () => ipcRenderer.removeListener('win:maximized', h);
+  },
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
 });

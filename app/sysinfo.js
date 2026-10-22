@@ -99,6 +99,137 @@ function cpuTopology() {
   return t;
 }
 
+/* ---------- GPU engine activity via DRM fdinfo ----------
+ * Per-process and system-wide GPU busy time comes from the kernel's DRM client
+ * usage stats: every fd a process holds on /dev/dri exposes cumulative
+ * drm-engine-<name> busy nanoseconds in /proc/<pid>/fdinfo/<fd>. Sampling the
+ * counters twice gives a real busy percentage — this is what KDE KSystemStats
+ * and Mission Center do, it needs no root, and it works on both amdgpu and
+ * i915 (verified on this machine: Intel render engine + amdgpu).            */
+const drmProcCache = new Map(); // pid -> { starttime, fds, scannedAt, prev: Map, prevAt }
+const pdevBusy = new Map();     // PCI device id -> busiest-engine busy % derived from fdinfo
+const GPU_FD_RESCAN_MS = 10000; // how often a process's DRM fd list is re-enumerated
+let gpuSystemAt = 0;
+let engineDeltas = new Map();   // 'pdev|engine' -> summed busy ns since last sample
+const engineCaps = new Map();   // 'pdev|engine' -> capacity (>1 engines count as one unit)
+
+function parseDrmFdinfo(txt) {
+  let pdev = '', client = '';
+  const engines = new Map();
+  for (const line of txt.split('\n')) {
+    const i = line.indexOf(':');
+    if (i < 0) continue;
+    const k = line.slice(0, i), v = line.slice(i + 1).trim();
+    if (k === 'drm-pdev') pdev = v;
+    else if (k === 'drm-client-id') client = v;
+    else if (k.startsWith('drm-engine-capacity-')) engineCaps.set(pdev + '|' + k.slice(20), parseInt(v, 10) || 1);
+    else if (k.startsWith('drm-engine-')) {
+      const ns = parseInt(v, 10);
+      if (Number.isFinite(ns)) engines.set(k.slice(12), ns);
+    }
+  }
+  return pdev && engines.size ? { pdev, client, engines } : null;
+}
+
+function sampleGpuClients(procs) {
+  const now = Date.now();
+  const procPct = new Map(); // pid -> % (busiest engine, like Windows Task Manager)
+  const live = new Set();
+  for (const p of procs) {
+    if (p.kernel) continue;
+    live.add(p.pid);
+    let rec = drmProcCache.get(p.pid);
+    if (!rec || rec.starttime !== p.starttime) {
+      // stagger first scans so 300 processes don't all rescan on the same tick
+      rec = { starttime: p.starttime, fds: [], scannedAt: 0, prev: new Map(), prevAt: 0 };
+      drmProcCache.set(p.pid, rec);
+    }
+    if (now - rec.scannedAt > GPU_FD_RESCAN_MS) {
+      rec.scannedAt = now;
+      rec.fds = [];
+      try {
+        for (const fd of fs.readdirSync('/proc/' + p.pid + '/fd')) {
+          try {
+            if (fs.readlinkSync('/proc/' + p.pid + '/fd/' + fd).startsWith('/dev/dri/')) rec.fds.push(fd);
+          } catch { /* fd closed mid-scan */ }
+        }
+      } catch { continue; } // gone, or another user's process (no permission)
+    }
+    if (!rec.fds.length) continue;
+    // one entry per DRM client: duplicated fds share a client id and the same
+    // counters, so keep the max per engine instead of summing
+    const clients = new Map();
+    for (const fd of rec.fds) {
+      let txt;
+      try { txt = fs.readFileSync('/proc/' + p.pid + '/fdinfo/' + fd, 'utf8'); } catch { continue; }
+      const info = parseDrmFdinfo(txt);
+      if (!info) continue;
+      const ck = info.pdev + '|' + info.client;
+      const slot = clients.get(ck);
+      if (!slot) clients.set(ck, info);
+      else for (const [e, ns] of info.engines) if (ns > (slot.engines.get(e) ?? 0)) slot.engines.set(e, ns);
+    }
+    if (!clients.size) continue;
+    const totals = new Map(); // 'pdev|engine' -> busy ns across this process's clients
+    for (const { pdev, engines } of clients.values())
+      for (const [e, ns] of engines) totals.set(pdev + '|' + e, (totals.get(pdev + '|' + e) || 0) + ns);
+    const dtMs = now - rec.prevAt;
+    if (rec.prevAt && dtMs >= 200) {
+      let best = 0;
+      for (const [k, ns] of totals) {
+        const prevNs = rec.prev.get(k);
+        if (prevNs == null || ns <= prevNs) { rec.prev.set(k, ns); continue; }
+        const cap = engineCaps.get(k) || 1;
+        const pct = ((ns - prevNs) / (dtMs * 1e6 * cap)) * 100;
+        if (pct > best) best = pct;
+        engineDeltas.set(k, (engineDeltas.get(k) || 0) + (ns - prevNs) / cap);
+      }
+      rec.prev = totals;
+      if (best > 0) procPct.set(p.pid, Math.min(100, best));
+    } else {
+      rec.prev = totals; // prime the counters; first interval has no delta yet
+    }
+    rec.prevAt = now;
+  }
+  if (drmProcCache.size > 4000 && live.size < drmProcCache.size / 2)
+    for (const pid of [...drmProcCache.keys()]) if (!live.has(pid)) drmProcCache.delete(pid);
+
+  // system busy per GPU = busiest engine summed across all clients (Windows
+  // shows the busiest engine too, not an average of engines)
+  if (gpuSystemAt && now - gpuSystemAt >= 200) {
+    const dtMs = now - gpuSystemAt;
+    pdevBusy.clear();
+    for (const [k, dNs] of engineDeltas) {
+      const pct = (dNs / (dtMs * 1e6)) * 100;
+      const pdev = k.slice(0, k.indexOf('|'));
+      if (pct > (pdevBusy.get(pdev) || 0)) pdevBusy.set(pdev, Math.min(100, pct));
+    }
+    engineDeltas = new Map();
+    gpuSystemAt = now;
+  } else if (!gpuSystemAt) gpuSystemAt = now;
+  return procPct;
+}
+
+/* NVIDIA proprietary totals via nvidia-smi (fdinfo only covers nouveau) */
+const nvidia = { checked: false, avail: false, at: 0, rows: null, busy: false };
+function refreshNvidia(now) {
+  if (!nvidia.checked) {
+    nvidia.checked = true;
+    nvidia.avail = ['nvidia-smi'].some((b) =>
+      fs.existsSync('/usr/bin/' + b) || fs.existsSync('/usr/local/bin/' + b));
+  }
+  if (!nvidia.avail || nvidia.busy || now - nvidia.at < 2500) return;
+  nvidia.busy = true;
+  execFile('nvidia-smi',
+    ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'],
+    { timeout: 3000 }, (err, out) => {
+      nvidia.busy = false;
+      nvidia.at = Date.now();
+      if (err) return;
+      nvidia.rows = String(out).trim().split('\n').map((l) => l.split(',').map((s) => parseInt(s, 10)));
+    });
+}
+
 /* ---------- GPU cards (static identity is cached, busy % re-read each sample) ---------- */
 let gpuStaticCache = null;
 function gpuCards() {
@@ -110,14 +241,15 @@ function gpuCards() {
     for (let i = 0; i < cards.length; i++) {
       const base = `/sys/class/drm/${cards[i]}`;
       const vendorId = (read(base + '/device/vendor') || '').trim().toLowerCase();
-      let driver = '';
+      let driver = '', pdev = '';
       try { driver = path.basename(fs.readlinkSync(base + '/device/driver')); } catch { /* no driver */ }
+      try { pdev = path.basename(fs.readlinkSync(base + '/device')); } catch { /* no device */ }
       const vendor = vendorId === '0x1002' || vendorId === '0x1008' ? 'AMD'
         : vendorId === '0x8086' ? 'Intel'
         : vendorId === '0x10de' ? 'NVIDIA'
         : (driver || 'GPU');
       list.push({
-        id: i, name: 'GPU ' + i, vendor, driver,
+        id: i, name: 'GPU ' + i, vendor, driver, pdev,
         vramTotal: parseInt(read(base + '/device/mem_info_vram_total') || '0', 10) || 0,
         maxMHz: parseInt(read(base + '/gt_max_freq_mhz') || '0', 10) || 0,
         base,
@@ -125,13 +257,27 @@ function gpuCards() {
     }
     gpuStaticCache = list;
   }
+  refreshNvidia(Date.now());
+  let nvidiaIdx = 0;
   return gpuStaticCache.map((g) => {
     let busy = parseInt(read(g.base + '/device/gpu_busy_percent') || '', 10);
-    if (!Number.isFinite(busy)) busy = null; // driver refused the read (EBUSY) or unsupported
+    if (!Number.isFinite(busy)) {
+      busy = pdevBusy.get(g.pdev);
+      // fdinfo-capable driver (amdgpu/i915/radeon/nouveau): no engine activity
+      // seen means the card is idle — report 0 rather than 'not available'
+      if (busy === undefined && /amdgpu|i915|radeon|nouveau/.test(g.driver)) busy = 0;
+      if (busy === undefined) busy = null;
+    }
+    let vramUsed = parseInt(read(g.base + '/device/mem_info_vram_used') || '0', 10) || 0;
+    if (g.vendor === 'NVIDIA' && nvidia.rows && nvidia.rows[nvidiaIdx]) {
+      const r = nvidia.rows[nvidiaIdx++]; // util%, mem used MiB, mem total MiB
+      if (Number.isFinite(r[0])) busy = r[0];
+      if (Number.isFinite(r[1])) vramUsed = r[1] * 1048576;
+      if (Number.isFinite(r[2]) && !g.vramTotal) g.vramTotal = r[2] * 1048576;
+    }
     return {
       id: g.id, name: g.name, vendor: g.vendor, driver: g.driver,
-      percent: busy, vramTotal: g.vramTotal,
-      vramUsed: parseInt(read(g.base + '/device/mem_info_vram_used') || '0', 10) || 0,
+      percent: busy, vramTotal: g.vramTotal, vramUsed,
       curMHz: parseInt(read(g.base + '/gt_cur_freq_mhz') || '0', 10) || 0,
       maxMHz: g.maxMHz,
     };
@@ -396,7 +542,11 @@ function sample() {
     appCpuTicks.set(key, (appCpuTicks.get(key) || 0) + Math.max(0, (pr ? p.cpuTicks - pr.cpuTicks : 0)));
     p.groupKey = key;
   }
-  prev.proc = procMap;    // ---- history ----
+  prev.proc = procMap;    // ---- per-process GPU busy (DRM fdinfo) ----
+  const gpuPctByPid = sampleGpuClients(s.procs);
+  for (const p of s.procs) p.gpuPercent = gpuPctByPid.get(p.pid) || 0;
+
+  // ---- history ----
   const gpus = gpuCards();
   pushHist(history.cpu, cpuPct);
   while (history.cores.length < corePcts.length) history.cores.push([]);

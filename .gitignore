@@ -1,5 +1,6 @@
-# --- dependencies ---
+# --- dependencies & caches ---
 node_modules/
+__pycache__/
 
 # --- build output (large binaries, never commit) ---
 dist/

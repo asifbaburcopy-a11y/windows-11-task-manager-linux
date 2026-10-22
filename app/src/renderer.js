@@ -98,14 +98,27 @@ const state = {
   startup: [],
   appHist: [],
   settings: JSON.parse(localStorage.getItem('api-settings') || '{"speed":"1000","startpage":"processes","allusers":true}'),
+  sort: { col: 'cpu', dir: -1 }, // which column the table is sorted by, and direction
 };
 function saveSettings() { localStorage.setItem('api-settings', JSON.stringify(state.settings)); }
 
-/* ---------- window controls (Electron only) ---------- */
+/* ---------- window controls (Electron only, frameless window) ---------- */
 if (api) {
   $('#btn-min').onclick = () => api.minimize();
   $('#btn-max').onclick = () => api.maximize();
   $('#btn-close').onclick = () => api.close();
+  // double-click the titlebar toggles maximise, like a native headerbar
+  $('#titlebar').ondblclick = (e) => { if (!e.target.closest('.tb-controls')) api.maximize(); };
+  const MAX_ICON = '<svg viewBox="0 0 10 10" width="10" height="10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg>';
+  const RESTORE_ICON = '<svg viewBox="0 0 10 10" width="10" height="10"><rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1"/><path d="M2.5 2.5V0.5h7v7h-2" fill="none" stroke="currentColor" stroke-width="1"/></svg>';
+  const setMaxIcon = (m) => {
+    const b = $('#btn-max');
+    b.innerHTML = m ? RESTORE_ICON : MAX_ICON;
+    b.title = m ? 'Restore down' : 'Maximise';
+    b.setAttribute('aria-label', b.title);
+  };
+  api.isMaximized().then(setMaxIcon).catch(() => {});
+  api.onMaximized(setMaxIcon);
 } else {
   $$('.tb-btn').forEach((b) => { b.style.display = 'none'; });
 }
@@ -209,11 +222,51 @@ function byNameGroup(list) {
     g.cpu += p.cpuPercent || 0;
     g.memKB += p.rssKB || 0;
     g.disk = Math.max(g.disk, p.diskPercent || 0);
+    g.gpu = Math.max(g.gpu, p.gpuPercent || 0);
     g.pids.push(p.pid);
     if (p.state === 'T' || p.state === 't') g.suspended = true;
   }
-  return [...m.values()].sort((a, b) => b.cpu - a.cpu || b.memKB - a.memKB);
+  return sortGroups([...m.values()]);
 }
+/* column sorting — click a header to sort by it (numeric columns start at
+ * busiest-first, like double-clicking CPU in the original) */
+const SORT_ACCESSORS = {
+  name: (g) => g.name.toLowerCase(),
+  status: (g) => (g.suspended ? 1 : 0),
+  cpu: (g) => g.cpu,
+  mem: (g) => g.memKB,
+  disk: (g) => g.disk,
+  net: (g) => g.net,
+  gpu: (g) => g.gpu,
+};
+function sortGroups(list) {
+  const get = SORT_ACCESSORS[state.sort.col] || SORT_ACCESSORS.cpu;
+  const dir = state.sort.dir;
+  return list.sort((a, b) => {
+    const va = get(a), vb = get(b);
+    const c = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+    return c * dir || b.cpu - a.cpu; // busiest first on ties
+  });
+}
+function updateSortIndicators() {
+  $$('#proc-table thead th[data-sort]').forEach((th) => {
+    const on = th.dataset.sort === state.sort.col;
+    th.classList.toggle('sorted', on);
+    let ind = th.querySelector('.sort-ind');
+    if (!ind) { ind = document.createElement('span'); ind.className = 'sort-ind'; th.appendChild(ind); }
+    ind.textContent = on ? (state.sort.dir === 1 ? '▲' : '▼') : '';
+  });
+}
+$$('#proc-table thead th[data-sort]').forEach((th) => {
+  th.onclick = () => {
+    const col = th.dataset.sort;
+    if (state.sort.col === col) state.sort.dir = -state.sort.dir;
+    else state.sort = { col, dir: (col === 'name' || col === 'status') ? 1 : -1 };
+    updateSortIndicators();
+    render();
+  };
+});
+updateSortIndicators();
 let procIconPromises = [];
 function renderProcesses() {
   const body = $('#proc-body');
@@ -239,7 +292,8 @@ function renderProcesses() {
         `<td class="num heat ${heatClass(g.cpu)}">${g.cpu.toFixed(g.cpu >= 10 ? 0 : 1)}%</td>` +
         `<td class="num heat ${memClass(g.memKB)}">${g.memKB >= 1048576 ? (g.memKB / 1048576).toFixed(1) + ' GB' : Math.round(g.memKB / 1024) + ' MB'}</td>` +
         `<td class="num heat ${heatClass(g.disk)}">${g.disk > 0 ? g.disk.toFixed(1) + '%' : ''}</td>` +
-        `<td class="num"></td><td class="num"></td></tr>`;
+        `<td class="num"></td>` +
+        `<td class="num heat ${heatClass(g.gpu || null)}">${g.gpu >= 0.1 ? g.gpu.toFixed(g.gpu >= 10 ? 0 : 1) + '%' : ''}</td></tr>`;
     }
   }
   body.innerHTML = html;
@@ -743,6 +797,7 @@ function mockSnapshot() {
     rssKB: memMB * 1024 * rnd(0.8, 1.2), cmdline: n + ' --force-profile=default', exe: '/usr/bin/' + n,
     kernel: n.startsWith('k'), starttime: 0, readBytes: 0, writeBytes: 0,
     cpuPercent: sys && n.startsWith('k') ? 0 : rnd(0, i < 3 ? 24 : 4), diskPercent: rnd(0, 1.5),
+    gpuPercent: i < 2 ? rnd(0, 60) : rnd(0, 8),
     isApp: !sys, groupKey: n,
   }));
   const cores = Array.from({ length: 8 }, () => rnd(2, 55));
@@ -824,8 +879,11 @@ async function boot() {
     if (state.settings.speed === 'paused') api.setPaused(true);
     try {
       const st = await api.getSettings();
-      $('#set-background').checked = st.backgroundOnClose !== false;
-      if (st.hotkey) $('#set-hotkey').textContent = st.hotkey;
+      $('#set-background').checked = !!st.backgroundOnClose;
+      if (st.hotkey) {
+        $('#set-hotkey').textContent = st.hotkey +
+          (st.hotkeyMethod === 'gnome' ? ' · system' : st.hotkeyMethod === 'electron' ? ' · app' : ' · unavailable');
+      }
     } catch { /* older main */ }
     const init = await api.initial();
     state.snap = init.snap;

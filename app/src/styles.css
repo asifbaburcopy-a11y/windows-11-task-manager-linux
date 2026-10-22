@@ -141,6 +141,11 @@ html, body {
 }
 .tbl td { padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tbl td.num, .tbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl thead th[data-sort] { cursor: pointer; user-select: none; }
+.tbl thead th[data-sort]:hover { color: var(--text); }
+.tbl thead th.sorted { color: var(--text); }
+.sort-ind { display: inline-block; width: 12px; text-align: center; font-size: 9px; color: var(--text-3); }
+.tbl thead th.sorted .sort-ind { color: var(--accent); }
 .col-name { width: 38%; }
 .col-status { width: 9%; }
 .col-cpu, .col-mem, .col-disk, .col-net, .col-gpu { width: 8.5%; text-align: right; }

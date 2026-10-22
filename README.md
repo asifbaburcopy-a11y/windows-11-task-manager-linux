@@ -8,12 +8,15 @@ If you have ever missed Task Manager after moving to Linux — or wanted a **sys
 
 ![License](https://img.shields.io/badge/license-MIT-blue) ![Platform](https://img.shields.io/badge/platform-Linux-lightgrey) ![Electron](https://img.shields.io/badge/Electron-33-47848f)
 
+**Latest release: 1.2.0** — per-process GPU usage, system-level `Ctrl+Shift+Esc`, sortable process columns, a single frameless title bar, and native quit-on-close.
+
 ---
 
 ## Table of contents
 
 - [Features](#features)
 - [Ctrl+Shift+Esc: the Task Manager hotkey](#ctrlshiftesc-the-task-manager-hotkey)
+- [Bugs fixed in 1.2.0: GPU usage, Ctrl+Shift+Esc, double title bar, close behaviour](#bugs-fixed-in-120-gpu-usage-ctrlshiftesc-double-title-bar-close-behaviour)
 - [Installation](#installation)
   - [1. AppImage (any Linux distro)](#1-appimage-any-linux-distro)
   - [2. .deb package (Debian / Ubuntu)](#2-deb-package-debian--ubuntu)
@@ -30,7 +33,7 @@ If you have ever missed Task Manager after moving to Linux — or wanted a **sys
 
 ## Features
 
-**Processes** — grouped exactly like Windows into **Apps**, **Background processes** and **Windows processes** (here: *System*). Live CPU and memory per process with the same heat-scale colouring, search with `Ctrl+F`, right-click menus, **End task** for any process, and a live status bar showing system-wide CPU, memory, disk and network.
+**Processes** — grouped exactly like Windows into **Apps**, **Background processes** and **Windows processes** (here: *System*). Live CPU, memory and **GPU busy %** per process with the same heat-scale colouring — **click any column header to sort** (CPU, Memory, Disk, GPU, …) to surface the heaviest consumers instantly — plus search with `Ctrl+F`, right-click menus, **End task** for any process, and a live status bar showing system-wide CPU, memory, disk and network.
 
 **Performance** — the full two-pane layout:
 
@@ -55,8 +58,8 @@ If you have ever missed Task Manager after moving to Linux — or wanted a **sys
 
 ### Extras beyond the original
 
-- **`Ctrl+Shift+Esc` opens Task Manager from anywhere** — same shortcut as Windows
-- **Tray icon** — closing the window hides it so the hotkey still works; quit from the tray
+- **`Ctrl+Shift+Esc` opens Task Manager from anywhere** — same shortcut as Windows, registered as a *system-level* keybinding so it works even while Task Manager is closed
+- **Closes like the native original** — closing quits completely and frees every resource; opt into a resident tray instance via **Settings → Keep running in background**
 - **Single instance** — relaunching raises the running window instead of opening a second one
 - **Run new task** dialog for launching a command
 
@@ -64,9 +67,55 @@ If you have ever missed Task Manager after moving to Linux — or wanted a **sys
 
 ## Ctrl+Shift+Esc: the Task Manager hotkey
 
-Press **`Ctrl+Shift+Esc`** anywhere on your desktop and the window appears, focused, showing fresh data — exactly how Task Manager behaves on Windows. If the window was closed it is still running in the tray, and this shortcut summons it.
+Press **`Ctrl+Shift+Esc`** anywhere on your desktop and the window appears, focused, showing fresh data — exactly how Task Manager behaves on Windows. If Task Manager isn't running, the shortcut starts it; if it is — open or resident in the tray — the shortcut raises that same instance instead of launching a second one.
 
-> If your desktop environment has already bound `Ctrl+Shift+Esc` to something else, the shortcut cannot be claimed (the app logs a warning). You can still open it from the app menu or the tray icon, and toggle background mode in **Settings → Keep running in background**.
+The installed app stores the shortcut in your desktop's own keyboard settings (GNOME's `custom-keybindings`), which is why it works reliably on both X11 and Wayland and survives reboots: your desktop owns the key, exactly as it does for native Linux applications.
+
+> On desktops without GNOME's keybinding facility the app falls back to its own in-app grab. If another application already owns `Ctrl+Shift+Esc` there, the shortcut cannot be claimed — a warning is logged and **Settings → Global hotkey** shows *unavailable*. You can always open Task Manager from the app menu.
+
+---
+
+## Bugs fixed in 1.2.0: GPU usage, Ctrl+Shift+Esc, double title bar, close behaviour
+
+Version 1.2.0 came out of a deep debugging session against a real Linux machine — AMD + Intel hybrid graphics, GNOME on Wayland — where five problems were reproduced, traced to their platform causes and fixed at the root rather than patched around.
+
+### 1. Two title bars, two sets of close buttons
+
+**Symptom.** The desktop drew its own title bar above the app's, stacking two rows of window controls.
+
+**Cause.** The window was created with the default frame *and* rendered its own in-app header — two chrome layers by design accident.
+
+**Fix.** The `BrowserWindow` is now created with `frame: false`, so the in-app Fluent header is the only title bar. Minimize, maximize and close travel over a narrow IPC bridge (`win:minimize` / `win:maximize` / `win:close`), and the maximize button subscribes to the real window state so it switches correctly between *maximize* and *restore* icons.
+
+### 2. GPU usage was always empty (`—`)
+
+**Symptom.** The GPU column and the Performance GPU page never produced a number.
+
+**Cause.** On a normal (non-root) account Linux deliberately hides GPU busy percentage: AMD's `gpu_busy_percent` returns `EBUSY`, Intel's `i915` exposes no busy counter at all, and NVIDIA's `utilization` file needs root. Reading only `/sys/class/drm/card*/` therefore fails for almost every real user — which is why the column looked permanently broken.
+
+**Fix.** The collector now reads **DRM fdinfo** — the per-file-descriptor GPU engine counters Linux exposes under `/proc/<pid>/fdinfo/*` (`drm-engine-render`, `drm-engine-video`, `drm-engine-copy`, …). Each file's monotonic millisecond counters are diffed between the 1-second samples to yield **per-process GPU busy %**, and the card's total is derived by summing its active clients — the same trick KDE's system monitor uses to show GPU % without root. The aggregate falls back through `gpu_busy_percent` → derived-from-clients → `0%`, cards are enumerated dynamically, and hybrid setups (Intel iGPU + AMD dGPU) report each card separately.
+
+### 3. Ctrl+Shift+Esc did not always work
+
+**Symptom.** The shortcut sometimes did nothing — and never worked while the app was closed.
+
+**Cause.** Electron's `globalShortcut` is an application-level grab: on Wayland compositors it is unreliable, and it only exists while the app is already running, so a cold start was impossible.
+
+**Fix.** On GNOME the shortcut is registered **where the desktop keeps its own shortcuts** — `org.gnome.settings-daemon.plugins.media-keys.custom-keybindings` — so GNOME's settings daemon handles the key at the compositor level, exactly like a native OS shortcut. It works from cold start, survives reboots, and cannot be lost when the window closes. Installation is idempotent (the list is read first, verified by read-back, never duplicated), the command is stored GVariant-quoted so paths containing spaces parse correctly, and the binding always points at the stable installed binary instead of a temporary AppImage extraction directory — a bug that used to leave the shortcut aimed at a dead `/tmp` path after every AppImage run. Non-GNOME desktops keep Electron's `globalShortcut` as fallback.
+
+### 4. Closing left every process running — but the hotkey spawned them all again
+
+**Symptom.** "Cutting" the software kept its whole process tree resident; pressing the hotkey then started another full tree; and closing was supposed to free everything, like native software.
+
+**Cause.** Close was intercepted with `preventDefault` into a hidden resident state, and nothing enforced a single instance, so each launch was a cold start.
+
+**Fix.** Closing the window now **quits the app completely** — all renderer, GPU and utility processes, timers and tray are torn down (verified: zero processes remain after close). Background residency became an explicit opt-in under **Settings → Keep running in background**. A single-instance lock makes any second launch quit itself and *raise the running window* instead of starting a second process tree, and sampling automatically pauses while the window is not visible, so a resident instance costs nothing.
+
+### 5. No way to find the top CPU / memory consumers
+
+**Symptom.** The process list had no sorting — you could not surface which app was eating CPU or RAM.
+
+**Fix.** Every Processes column header is clickable — Name, Status, CPU, Memory, Disk, Network, GPU — with a live ▲/▼ indicator, defaulting to CPU descending. Sorting is stable inside each group, so rows stay in their Apps / Background / System group while reordering, and one click flips the direction.
 
 ---
 
@@ -77,15 +126,15 @@ Press **`Ctrl+Shift+Esc`** anywhere on your desktop and the window appears, focu
 Works on Ubuntu, Debian, Fedora, Arch, openSUSE and everything else — no root, no package manager needed.
 
 ```bash
-chmod +x TaskManager-1.1.0.AppImage
-./TaskManager-1.1.0.AppImage
+chmod +x TaskManager-1.2.0.AppImage
+./TaskManager-1.2.0.AppImage
 ```
 
 Run it once to confirm it works, then optionally install it into your desktop menu:
 
 ```bash
 mkdir -p ~/.local/bin ~/.local/share/applications
-cp TaskManager-1.1.0.AppImage ~/.local/bin/task-manager
+cp TaskManager-1.2.0.AppImage ~/.local/bin/task-manager
 cat > ~/.local/share/applications/task-manager.desktop <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -103,23 +152,29 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 **No FUSE?** Some minimal systems need:
 
 ```bash
-./TaskManager-1.1.0.AppImage --appimage-extract-and-run
+./TaskManager-1.2.0.AppImage --appimage-extract-and-run
 ```
 
 ### 2. .deb package (Debian / Ubuntu)
 
 ```bash
-sudo apt install ./task-manager_1.1.0_amd64.deb
+sudo apt install ./task-manager_1.2.0_amd64.deb
 ```
 
 Or with plain `dpkg`:
 
 ```bash
-sudo dpkg -i task-manager_1.1.0_amd64.deb
+sudo dpkg -i task-manager_1.2.0_amd64.deb
 sudo apt-get install -f    # resolves any missing dependencies
 ```
 
-Launch it from your application menu under **System → Task Manager**, or run `task-manager-replica` in a terminal.
+Launch it from your application menu under **System → Task Manager**, or run `task-manager-replica` in a terminal. On first launch the app installs the **Ctrl+Shift+Esc** system shortcut automatically (GNOME) — confirm with:
+
+```bash
+dpkg -s task-manager | grep Version        # → Version: 1.2.0
+gsettings get org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/task-manager/ binding
+# → '<Control><Shift>Escape'
+```
 
 Uninstall any time with:
 
@@ -165,6 +220,7 @@ The collector ([`app/sysinfo.js`](app/sysinfo.js)) is dependency-free Node.js. I
 | SSD vs HDD media type | `/sys/block/*/queue/rotational` |
 | Network throughput per adapter | `/proc/net/dev` |
 | GPU utilization, VRAM, clocks | `/sys/class/drm/card*/` |
+| Per-process GPU busy %, per-GPU totals | DRM fdinfo engine counters: `/proc/[pid]/fdinfo/*` |
 | Up time, load average | `/proc/uptime`, `/proc/loadavg` |
 | Services | `systemctl show --type=service` |
 | Startup apps | XDG autostart `.desktop` files |
@@ -223,7 +279,7 @@ windows-11-task-manager-linux/
 
 - Per-core CPU graphs on the Performance page
 - Light theme toggle
-- GPU utilization on `i915` and proprietary NVIDIA
+- GPU power draw and per-process VRAM where the driver exposes it
 - Effectiveness/efficiency core breakdown on hybrid CPUs
 - Memory pressure and per-process disk I/O columns
 
@@ -239,11 +295,11 @@ No. This is an independent, original implementation written for Linux. Windows a
 **Is any of my data uploaded?**
 No. The app reads local kernel interfaces only, makes no outbound network requests, and loads no remote scripts or analytics.
 
-**Why does GPU show `—` for utilization?**
-The driver must expose `gpu_busy_percent` (AMD's `amdgpu` often returns `EBUSY`, and Intel's `i915` exposes clocks but no busy percentage). VRAM and clock readings are still shown where available.
+**Why does GPU show `—` for a moment?**
+GPU figures come from DRM fdinfo engine counters, which work without root on AMD, Intel and NVIDIA alike, so the column fills on any modern driver. A `—` can appear for the first second only (the collector needs two samples to compute a rate) or on very old kernels that expose no DRM counters at all. VRAM and clock readings are still shown where available.
 
 **Why can't `Ctrl+Shift+Esc` be registered?**
-Your desktop environment or another application already owns that shortcut. Check your DE's keyboard shortcut settings and free it up. The tray menu and app menu still open Task Manager.
+On GNOME it is installed automatically as a system shortcut, so it cannot conflict. On other desktops the app falls back to an in-app grab — if another application already owns the key there, free it up in your DE's keyboard settings. The tray menu and app menu still open Task Manager.
 
 **Does it work on Wayland?**
 Yes. It is a normal Electron app; it runs on Wayland and X11 alike.

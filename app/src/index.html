@@ -89,13 +89,13 @@
           <table class="tbl" id="proc-table">
             <thead>
               <tr>
-                <th class="col-name">Name</th>
-                <th class="col-status">Status</th>
-                <th class="col-cpu">CPU</th>
-                <th class="col-mem">Memory</th>
-                <th class="col-disk">Disk</th>
-                <th class="col-net">Network</th>
-                <th class="col-gpu">GPU</th>
+                <th class="col-name" data-sort="name" title="Sort by name">Name</th>
+                <th class="col-status" data-sort="status" title="Sort by status">Status</th>
+                <th class="col-cpu" data-sort="cpu" title="Sort by CPU">CPU</th>
+                <th class="col-mem" data-sort="mem" title="Sort by memory">Memory</th>
+                <th class="col-disk" data-sort="disk" title="Sort by disk">Disk</th>
+                <th class="col-net" data-sort="net" title="Sort by network">Network</th>
+                <th class="col-gpu" data-sort="gpu" title="Sort by GPU">GPU</th>
               </tr>
             </thead>
             <tbody id="proc-body"></tbody>
@@ -250,14 +250,14 @@
           <div class="setting-row">
             <div>
               <div class="setting-label">Keep running in background</div>
-              <div class="setting-desc">Closing the window hides it instead, so <code>Ctrl+Shift+Esc</code> can still open Task Manager. Quit from the tray icon.</div>
+              <div class="setting-desc">Off by default, like the Windows original: closing quits Task Manager completely and frees all its resources. Turn on to keep it in the tray — <code>Ctrl+Shift+Esc</code> then reopens the same instance instantly.</div>
             </div>
-            <label class="switch"><input type="checkbox" id="set-background" checked><span class="slider"></span></label>
+            <label class="switch"><input type="checkbox" id="set-background"><span class="slider"></span></label>
           </div>
           <div class="setting-row">
             <div>
               <div class="setting-label">Global hotkey</div>
-              <div class="setting-desc">Opens Task Manager from anywhere while it is running.</div>
+              <div class="setting-desc">Opens Task Manager from anywhere. When installed as a .deb this is a system-level shortcut, so it works even while Task Manager is closed.</div>
             </div>
             <span class="status-chip" id="set-hotkey">Ctrl+Shift+Esc</span>
           </div>

@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut, Tray, Menu }
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { execFile } = require('child_process');
 const sysinfo = require('./sysinfo');
 
 let win = null;
@@ -14,9 +15,12 @@ let quitting = false;
 
 const HOTKEY = 'CommandOrControl+Shift+Escape';
 
-/* ---------- tiny persisted settings (tray behaviour) ---------- */
+/* ---------- tiny persisted settings ---------- */
+/* backgroundOnClose defaults to false: like the Windows original, closing the
+ * window quits the app completely — no tray, no resident processes, zero
+ * resources. The tray mode is opt-in from Settings. */
 const SETTINGS_PATH = () => path.join(app.getPath('userData'), 'settings.json');
-const settings = { backgroundOnClose: true };
+const settings = { backgroundOnClose: false };
 function loadSettings() {
   try { Object.assign(settings, JSON.parse(fs.readFileSync(SETTINGS_PATH(), 'utf8'))); } catch { /* first run */ }
 }
@@ -33,13 +37,14 @@ function snapshotNow() {
   }
 }
 
-/* ---------- window ---------- */
+/* ---------- window (frameless: the in-app titlebar is the only one) ---------- */
 function createWindow() {
   win = new BrowserWindow({
     width: 1100,
     height: 720,
     minWidth: 760,
     minHeight: 480,
+    frame: false,
     title: 'Task Manager',
     backgroundColor: '#202020',
     autoHideMenuBar: true,
@@ -52,18 +57,22 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
+  const pushMax = () => { if (win && !win.isDestroyed()) win.webContents.send('win:maximized', win.isMaximized()); };
+  win.on('maximize', pushMax);
+  win.on('unmaximize', pushMax);
   win.on('close', (e) => {
-    if (quitting) { if (timer) { clearInterval(timer); timer = null; } win = null; return; }
-    if (settings.backgroundOnClose) { e.preventDefault(); win.hide(); }
+    if (quitting) { stopPolling(); win = null; return; }
+    if (settings.backgroundOnClose && tray) { e.preventDefault(); win.hide(); stopPolling(); }
+    // default (native behaviour): let the window close — window-all-closed quits
   });
   win.on('closed', () => { win = null; });
-  win.on('hide', () => {});
 }
 
 /* Ctrl+Shift+Esc — mirrors the Windows behaviour of summoning Task Manager */
 function showWindow() {
   if (!win || win.isDestroyed()) createWindow();
   if (win.isMinimized()) win.restore();
+  if (!timer) startPolling(); // window was hidden to tray (or freshly created)
   win.show();
   win.focus();
   if (typeof win.moveTop === 'function') { try { win.moveTop(); } catch { /* unsupported */ } }
@@ -91,14 +100,74 @@ function createTray() {
     console.warn('tray unavailable:', e.message);
   }
 }
+function destroyTray() { if (tray) { tray.destroy(); tray = null; } }
+
+/* ---------- global hotkey ---------- *
+ * The reliable, native way to own Ctrl+Shift+Esc on a GNOME session (X11 or
+ * Wayland) is a desktop-level keybinding: GNOME's settings daemon handles the
+ * key at the compositor, so it works whether or not the app is running, and it
+ * can never be lost. We install it idempotently into gsettings when packaged.
+ * Electron's globalShortcut stays as the fallback for other desktops.        */
+const KB_SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys';
+const KB_DIR = '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/task-manager/';
+const KB_FULL = KB_SCHEMA + '.custom-keybinding:' + KB_DIR;
+let hotkeyMethod = 'none'; // 'gnome' | 'electron' | 'none'
+
+function gsettings(args, cb) {
+  execFile('gsettings', args, { timeout: 4000 }, (err, stdout) => cb(err, (stdout || '').trim()));
+}
+
+const gvStr = (s) => "'" + String(s).replace(/'/g, "\\'") + "'"; // GVariant string literal
+function installGnomeHotkey(done) {
+  if (!app.isPackaged) return done(false); // dev runs shouldn't own the system key
+  // The system binding must outlive this run: AppImages execute from a /tmp
+  // extraction dir, so prefer the stable installed binary when it exists.
+  let bin = process.execPath;
+  const installed = '/opt/Task Manager/task-manager-replica';
+  if (bin.startsWith('/tmp/') && fs.existsSync(installed)) bin = installed;
+  const exec = '"' + bin + '"'; // kept quoted for g_shell_parse when GNOME runs it
+  gsettings(['get', KB_SCHEMA, 'custom-keybindings'], (err, cur) => {
+    if (err) return done(false);
+    // parse the GVariant array of paths: ['a', 'b'] (or an empty @as [])
+    const list = (String(cur).match(/'([^']*)'/g) || []).map((s) => s.slice(1, -1));
+    if (!list.includes(KB_DIR)) list.push(KB_DIR);
+    const arr = '[' + list.map((p) => "'" + p + "'").join(', ') + ']';
+    const steps = [
+      (cb) => gsettings(['set', KB_SCHEMA, 'custom-keybindings', arr], cb),
+      (cb) => gsettings(['set', KB_FULL, 'name', gvStr('Task Manager')], cb),
+      (cb) => gsettings(['set', KB_FULL, 'binding', gvStr('<Control><Shift>Escape')], cb),
+      (cb) => gsettings(['set', KB_FULL, 'command', gvStr(exec)], cb),
+      (cb) => gsettings(['get', KB_FULL, 'binding'], (e, out) =>
+        cb(e || (String(out).replace(/^'|'$/g, '') !== '<Control><Shift>Escape'
+          ? new Error('binding verify failed') : null))),
+    ];
+    let i = 0, fail = null;
+    const run = (e) => {
+      if (e && !fail) fail = e;
+      if (fail || i >= steps.length) return done(!fail);
+      steps[i++](run);
+    };
+    run(null);
+  });
+}
 
 function registerHotkey() {
-  try {
-    const ok = globalShortcut.register(HOTKEY, showWindow);
-    if (!ok) console.warn('Ctrl+Shift+Esc is already grabbed by another application');
-  } catch (e) {
-    console.warn('global hotkey failed:', e.message);
-  }
+  installGnomeHotkey((ok) => {
+    if (ok) {
+      hotkeyMethod = 'gnome';
+      console.log('hotkey: registered via GNOME keybindings');
+      return;
+    }
+    // fallback for non-GNOME desktops: Electron's own grab
+    try {
+      const registered = globalShortcut.register(HOTKEY, showWindow);
+      hotkeyMethod = registered ? 'electron' : 'none';
+      if (!registered) console.warn('Ctrl+Shift+Esc is already grabbed by another application');
+    } catch (e) {
+      hotkeyMethod = 'none';
+      console.warn('global hotkey failed:', e.message);
+    }
+  });
 }
 
 function startPolling() {
@@ -110,6 +179,7 @@ function startPolling() {
     snapshotNow();
   }, 1000);
 }
+function stopPolling() { if (timer) { clearInterval(timer); timer = null; } }
 
 // ---- IPC ----
 ipcMain.handle('sys:initial', () => {
@@ -149,7 +219,7 @@ ipcMain.handle('run:task', async (_e, cmd) => {
   });
 });
 
-// window buttons
+// window buttons (frameless titlebar)
 ipcMain.on('win:minimize', () => win && win.minimize());
 ipcMain.on('win:maximize', () => {
   if (!win) return;
@@ -161,9 +231,12 @@ ipcMain.handle('win:isMaximized', () => (win ? win.isMaximized() : false));
 ipcMain.handle('app:paths', () => ({ home: os.homedir() }));
 
 // background / hotkey settings
-ipcMain.handle('settings:get', () => ({ ...settings, hotkey: 'Ctrl+Shift+Esc', platform: process.platform }));
+ipcMain.handle('settings:get', () => ({ ...settings, hotkey: 'Ctrl+Shift+Esc', hotkeyMethod, platform: process.platform }));
 ipcMain.handle('settings:set', (_e, patch) => {
-  if (patch && typeof patch.backgroundOnClose === 'boolean') settings.backgroundOnClose = patch.backgroundOnClose;
+  if (patch && typeof patch.backgroundOnClose === 'boolean') {
+    settings.backgroundOnClose = patch.backgroundOnClose;
+    if (patch.backgroundOnClose) createTray(); else destroyTray();
+  }
   saveSettings();
   return { ...settings };
 });
@@ -180,20 +253,11 @@ if (!gotLock) {
     loadSettings();
     createWindow();
     startPolling();
-    createTray();
+    if (settings.backgroundOnClose) createTray();
     registerHotkey();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) { createWindow(); startPolling(); } });
   });
 }
-
-// fallback: Ctrl+Shift+Esc while the window already has focus
-app.on('browser-window-focus', () => {
-  if (!win) return;
-  win.webContents.on('before-input-event', function handler(_e, input) {
-    if (!win) return win.webContents.removeListener('before-input-event', handler);
-    if (input.type === 'keyDown' && input.control && input.shift && input.code === 'Escape') showWindow();
-  });
-});
 
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
