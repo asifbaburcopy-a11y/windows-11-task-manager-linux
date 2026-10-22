@@ -1,0 +1,58 @@
+name: Release installers
+
+# Builds the two installable packages (.deb for Debian/Ubuntu, AppImage for
+# any distro) and attaches them to the GitHub release whose tag matches the
+# version in app/package.json.
+#
+# Triggers:
+#   - pushing a tag such as v1.3.0 — creates the release if it is missing,
+#     then builds and attaches the installers
+#   - manual run from the Actions tab — rebuilds and re-attaches to the
+#     current version's release (useful to retry an upload)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci --no-audit --no-fund
+
+      - name: Build AppImage
+        working-directory: app
+        run: npm run dist
+
+      - name: Build .deb
+        working-directory: app
+        run: npm run deb
+
+      - name: Attach installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./app/package.json').version")
+          TAG="v${VERSION}"
+          echo "Attaching installers for release ${TAG}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Task Manager ${TAG}" --generate-notes
+          fi
+          gh release upload "$TAG" dist/task-manager_*_amd64.deb dist/TaskManager-*.AppImage --clobber
+          echo "Release assets now:"
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) — \(.size) bytes"'
