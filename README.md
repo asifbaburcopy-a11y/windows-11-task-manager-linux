@@ -121,6 +121,8 @@ Version 1.2.0 came out of a deep debugging session against a real Linux machine 
 
 ## Installation
 
+Download a package from the **[latest release](https://github.com/asifbaburcopy-a11y/windows-11-task-manager-linux/releases/latest)** — every `v*` tag automatically builds both installers via CI — or build them yourself with [option 3](#3-build-from-source).
+
 ### 1. AppImage (any Linux distro)
 
 Works on Ubuntu, Debian, Fedora, Arch, openSUSE and everything else — no root, no package manager needed.
